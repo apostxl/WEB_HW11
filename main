@@ -1,0 +1,94 @@
+from fastapi import FastAPI, HTTPException, Query
+from pydantic import BaseModel
+from sqlalchemy import create_engine, Column, Integer, String, Date
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker
+from datetime import date, timedelta
+
+app = FastAPI()
+
+SQLALCHEMY_DATABASE_URL = "sqlite:///./contacts.db"
+
+engine = create_engine(SQLALCHEMY_DATABASE_URL)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+class Contact(Base):
+    __tablename__ = "contacts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    first_name = Column(String, index=True)
+    last_name = Column(String, index=True)
+    email = Column(String, unique=True, index=True)
+    phone_number = Column(String, index=True)
+    birthday = Column(Date)
+    additional_data = Column(String, nullable=True)
+
+Base.metadata.create_all(bind=engine)
+
+class ContactCreate(BaseModel):
+    first_name: str
+    last_name: str
+    email: str
+    phone_number: str
+    birthday: date
+    additional_data: str = None
+
+@app.post("/contacts/", response_model=Contact)
+def create_contact(contact: ContactCreate, db: Session = Depends(get_db)):
+    db_contact = Contact(**contact.dict())
+    db.add(db_contact)
+    db.commit()
+    db.refresh(db_contact)
+    return db_contact
+
+@app.get("/contacts/", response_model=list[Contact])
+def get_contacts(
+    search: str = None,
+    birthday_range: int = Query(None, le=7)
+):
+    db = SessionLocal()
+    contacts = db.query(Contact)
+    if search:
+        contacts = contacts.filter(
+            or_(
+                Contact.first_name.contains(search),
+                Contact.last_name.contains(search),
+                Contact.email.contains(search)
+            )
+        )
+    if birthday_range is not None:
+        today = date.today()
+        end_date = today + timedelta(days=birthday_range)
+        contacts = contacts.filter(
+            extract('month', Contact.birthday) == today.month,
+            extract('day', Contact.birthday).between(today.day, end_date.day)
+        )
+    return contacts.all()
+
+@app.get("/contacts/{contact_id}", response_model=Contact)
+def get_contact(contact_id: int, db: Session = Depends(get_db)):
+    contact = db.query(Contact).filter(Contact.id == contact_id).first()
+    if not contact:
+        raise HTTPException(status_code=404, detail="Contact not found")
+    return contact
+
+@app.put("/contacts/{contact_id}", response_model=Contact)
+def update_contact(contact_id: int, contact: ContactCreate, db: Session = Depends(get_db)):
+    db_contact = db.query(Contact).filter(Contact.id == contact_id).first()
+    if not db_contact:
+        raise HTTPException(status_code=404, detail="Contact not found")
+    for key, value in contact.dict().items():
+        setattr(db_contact, key, value)
+    db.commit()
+    db.refresh(db_contact)
+    return db_contact
+
+@app.delete("/contacts/{contact_id}")
+def delete_contact(contact_id: int, db: Session = Depends(get_db)):
+    contact = db.query(Contact).filter(Contact.id == contact_id).first()
+    if not contact:
+        raise HTTPException(status_code=404, detail="Contact not found")
+    db.delete(contact)
+    db.commit()
+    return {"message": "Contact deleted successfully"}
